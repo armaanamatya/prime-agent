@@ -33,8 +33,21 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let super_key = key.modifiers.contains(KeyModifiers::SUPER);
-    let base = match key.code {
+    match key.code {
         KeyCode::Char(c) => {
+            // The named printables (TS formatParsedKey: `enter`, `tab`, `space`) keep every
+            // modifier like the dedicated key classes below. A legacy NUL and a kitty
+            // `CSI 32;5u` both arrive as Char(' ')+CONTROL: that is the TS `ctrl+space`,
+            // never the raw "ctrl+ " no binding can name.
+            let named = match c {
+                '\r' | '\n' => Some("enter"),
+                '\t' => Some("tab"),
+                ' ' => Some("space"),
+                _ => None,
+            };
+            if let Some(name) = named {
+                return Some(modified_name(name, ctrl, alt, shift, super_key));
+            }
             if ctrl {
                 return Some(ctrl_char_id(c, alt, shift, super_key));
             }
@@ -53,12 +66,6 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
                 ));
             }
             if alt {
-                if c == '\r' || c == '\n' {
-                    return Some("alt+enter".into());
-                }
-                if c == ' ' {
-                    return Some("alt+space".into());
-                }
                 // rxvt-family alt+arrow encodings (TS `LEGACY_SEQUENCE_KEY_IDS`): those terminals
                 // send ESC p/n/b/f for Option+Up/Down/Left/Right, and TS parseKey maps the byte
                 // sequence before its alt+letter fallback. crossterm folds the bytes into the same
@@ -88,116 +95,33 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
                 };
                 return Some(format!("{prefix}{}", c.to_ascii_lowercase()));
             }
-            if c == '\r' || c == '\n' {
-                if shift {
-                    return Some("shift+enter".into());
-                }
-                return Some("enter".into());
-            }
-            if c == '\t' {
-                return Some(if shift {
-                    "shift+tab".into()
-                } else {
-                    "tab".into()
-                });
-            }
-            if c == ' ' {
-                // parseKey maps the raw space to the `space` key id; the printable
-                // decoders (`decode_printable`) map it back for text surfaces.
-                if shift {
-                    return Some("shift+space".into());
-                }
-                return Some("space".into());
-            }
-            return Some(c.to_string());
+            Some(c.to_string())
         }
-        KeyCode::Enter => {
-            // The super prefix keeps Cmd-modified keys their own identity (unbound combos
-            // match nothing instead of falling through to the bare action and submitting).
-            if super_key {
-                let mut s = String::new();
-                if shift {
-                    s.push_str("shift+");
-                }
-                if alt {
-                    s.push_str("alt+");
-                }
-                s.push_str("super+enter");
-                return Some(s);
-            }
-            if alt {
-                "alt+enter"
-            } else if shift {
-                "shift+enter"
-            } else {
-                "enter"
-            }
-        }
-        KeyCode::Tab => {
-            if super_key {
-                return Some(if shift {
-                    "shift+super+tab".into()
-                } else {
-                    "super+tab".into()
-                });
-            }
-            if shift {
-                "shift+tab"
-            } else {
-                "tab"
-            }
-        }
-        KeyCode::Backspace => {
-            if super_key {
-                return Some(match (ctrl, alt) {
-                    (true, true) => "ctrl+alt+super+backspace".into(),
-                    (true, false) => "ctrl+super+backspace".into(),
-                    (false, true) => "alt+super+backspace".into(),
-                    (false, false) => "super+backspace".into(),
-                });
-            }
-            if alt {
-                "alt+backspace"
-            } else if ctrl {
-                // ctrl+backspace: TS maps raw 0x08 to backspace except Windows Terminal.
-                return Some("ctrl+backspace".into());
-            } else {
-                "backspace"
-            }
-        }
-        KeyCode::Esc => {
-            if super_key {
-                return Some("super+escape".into());
-            }
-            "escape"
-        }
-        KeyCode::Left => return Some(modified_name("left", ctrl, alt, shift, super_key)),
-        KeyCode::Right => return Some(modified_name("right", ctrl, alt, shift, super_key)),
-        KeyCode::Up => return Some(modified_name("up", ctrl, alt, shift, super_key)),
-        KeyCode::Down => return Some(modified_name("down", ctrl, alt, shift, super_key)),
-        KeyCode::Home => return Some(modified_name("home", ctrl, alt, shift, super_key)),
-        KeyCode::End => return Some(modified_name("end", ctrl, alt, shift, super_key)),
-        KeyCode::PageUp => return Some(modified_name("pageUp", ctrl, alt, shift, super_key)),
-        KeyCode::PageDown => return Some(modified_name("pageDown", ctrl, alt, shift, super_key)),
-        KeyCode::Delete => return Some(modified_name("delete", ctrl, alt, shift, super_key)),
-        KeyCode::Insert => return Some(modified_name("insert", ctrl, alt, shift, super_key)),
-        KeyCode::F(n) => return Some(modified_name(&format!("f{n}"), ctrl, alt, shift, super_key)),
-        KeyCode::BackTab => {
-            if super_key {
-                return Some(if alt {
-                    "shift+alt+super+tab".into()
-                } else {
-                    "shift+super+tab".into()
-                });
-            }
-            if alt {
-                // The merged meta-wrapped `ESC ESC [ Z` (Option+Shift+Tab with option-as-meta):
-                // TS's double-ESC branch strips alt and matches the rest, so the wrapped
-                // identity keeps the ALT.
-                return Some("shift+alt+tab".into());
-            }
-            return Some("shift+tab".into());
-        }
+        // The dedicated key classes keep every modifier (TS formatKeyNameWithModifiers):
+        // an unbound chord such as ctrl+enter, ctrl+tab or ctrl+escape matches nothing
+        // instead of falling through to the bare key's action, and a configured binding
+        // on it can match. The editor reads the shifted delete (`shift+backspace`) itself.
+        KeyCode::Enter => Some(modified_name("enter", ctrl, alt, shift, super_key)),
+        KeyCode::Tab => Some(modified_name("tab", ctrl, alt, shift, super_key)),
+        KeyCode::Backspace => Some(modified_name("backspace", ctrl, alt, shift, super_key)),
+        KeyCode::Esc => Some(modified_name("escape", ctrl, alt, shift, super_key)),
+        KeyCode::Left => Some(modified_name("left", ctrl, alt, shift, super_key)),
+        KeyCode::Right => Some(modified_name("right", ctrl, alt, shift, super_key)),
+        KeyCode::Up => Some(modified_name("up", ctrl, alt, shift, super_key)),
+        KeyCode::Down => Some(modified_name("down", ctrl, alt, shift, super_key)),
+        KeyCode::Home => Some(modified_name("home", ctrl, alt, shift, super_key)),
+        KeyCode::End => Some(modified_name("end", ctrl, alt, shift, super_key)),
+        KeyCode::PageUp => Some(modified_name("pageUp", ctrl, alt, shift, super_key)),
+        KeyCode::PageDown => Some(modified_name("pageDown", ctrl, alt, shift, super_key)),
+        KeyCode::Delete => Some(modified_name("delete", ctrl, alt, shift, super_key)),
+        KeyCode::Insert => Some(modified_name("insert", ctrl, alt, shift, super_key)),
+        KeyCode::F(n) => Some(modified_name(&format!("f{n}"), ctrl, alt, shift, super_key)),
+        // crossterm's `\x1b[Z` and the shifted kitty `CSI 9;2u`. The merged meta-wrapped
+        // `ESC ESC [ Z` (Option+Shift+Tab with option-as-meta) arrives as ALT+BackTab and
+        // keeps the ALT: TS's double-ESC branch strips alt and matches the rest.
+        KeyCode::BackTab => Some(modified_name(
+            "tab", ctrl, alt, /*shift*/ true, super_key,
+        )),
         KeyCode::Null
         | KeyCode::CapsLock
         | KeyCode::ScrollLock
@@ -207,11 +131,8 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
         | KeyCode::Menu
         | KeyCode::KeypadBegin
         | KeyCode::Modifier(_)
-        | KeyCode::Media(_) => {
-            return None;
-        }
-    };
-    Some(base.to_string())
+        | KeyCode::Media(_) => None,
+    }
 }
 
 /// The ctrl-modified character identities (TS parseKey/formatParsedKey):
@@ -689,5 +610,116 @@ mod tests {
         assert!(kb.matches("shift+ctrl+left", "tui.editor.selectWordLeft"));
         assert!(kb.matches("shift+home", "tui.editor.selectLineStart"));
         assert!(kb.matches("shift+ctrl+home", "tui.editor.selectDocStart"));
+    }
+
+    /// Modifier-bearing special keys keep every modifier (TS formatKeyNameWithModifiers): a
+    /// kitty `CSI 9;5u` is `ctrl+tab`, never the bare `tab` that fires autocomplete, and the
+    /// legacy NUL / kitty `CSI 32;5u` is the canonical `ctrl+space`, not the raw "ctrl+ " no
+    /// binding can name. Every expected id is what TS `parseKey` returns for the row's sequence.
+    #[test]
+    fn modified_special_keys_keep_every_modifier() {
+        let cases = [
+            (KeyCode::Tab, KeyModifiers::CONTROL, "ctrl+tab", "CSI 9;5u"),
+            (KeyCode::Tab, KeyModifiers::ALT, "alt+tab", "CSI 9;3u"),
+            (
+                KeyCode::BackTab,
+                KeyModifiers::SHIFT | KeyModifiers::CONTROL,
+                "shift+ctrl+tab",
+                "CSI 9;6u",
+            ),
+            (
+                KeyCode::Enter,
+                KeyModifiers::CONTROL,
+                "ctrl+enter",
+                "CSI 13;5u",
+            ),
+            (
+                KeyCode::Enter,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                "shift+ctrl+enter",
+                "CSI 13;6u",
+            ),
+            (
+                KeyCode::Char(' '),
+                KeyModifiers::CONTROL,
+                "ctrl+space",
+                "NUL and CSI 32;5u",
+            ),
+            (
+                KeyCode::Char(' '),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                "ctrl+alt+space",
+                "CSI 32;7u",
+            ),
+            (
+                KeyCode::Char(' '),
+                KeyModifiers::SUPER,
+                "super+space",
+                "CSI 32;9u",
+            ),
+            (
+                KeyCode::Esc,
+                KeyModifiers::CONTROL,
+                "ctrl+escape",
+                "CSI 27;5u",
+            ),
+            (KeyCode::Esc, KeyModifiers::ALT, "alt+escape", "CSI 27;3u"),
+            (
+                KeyCode::Esc,
+                KeyModifiers::SHIFT,
+                "shift+escape",
+                "CSI 27;2u",
+            ),
+            (
+                KeyCode::Backspace,
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                "ctrl+alt+backspace",
+                "CSI 127;7u",
+            ),
+            (
+                KeyCode::Backspace,
+                KeyModifiers::SHIFT,
+                "shift+backspace",
+                "CSI 127;2u",
+            ),
+        ];
+        for (code, modifiers, expected, sequence) in cases {
+            let event = KeyEvent::new(code, modifiers);
+            assert_eq!(
+                key_event_to_id(&event).as_deref(),
+                Some(expected),
+                "{sequence}"
+            );
+        }
+        // The chords no longer reach the bare key's default action...
+        let defaults = crate::keybindings::KeybindingsManager::new();
+        for (id, action) in [
+            ("ctrl+tab", "tui.input.tab"),
+            ("alt+tab", "tui.input.tab"),
+            ("ctrl+enter", "tui.input.submit"),
+            ("ctrl+escape", "app.input.clear"),
+            ("ctrl+space", "app.agents.reply"),
+        ] {
+            assert!(
+                !defaults.matches(id, action),
+                "{id} must not trigger {action}"
+            );
+        }
+        // ...and a binding configured on one of them matches.
+        let config: crate::keybindings::KeybindingsConfig = [(
+            "tui.input.tab".to_string(),
+            vec!["tab".to_string(), "ctrl+tab".to_string()],
+        )]
+        .into_iter()
+        .collect();
+        let configured = crate::keybindings::KeybindingsManager::with_user_bindings(config);
+        assert!(configured.matches("ctrl+tab", "tui.input.tab"));
+        // The shifted delete keeps deleting: the editor reads `shift+backspace` itself (TS
+        // editor.ts `matchesKey(data, "shift+backspace")`).
+        let mut editor = crate::editor::Editor::new();
+        for id in ["a", "b", "shift+backspace"] {
+            editor.handle_input(id);
+        }
+        assert_eq!(editor.get_text(), "a");
     }
 }
